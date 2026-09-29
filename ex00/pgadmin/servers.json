@@ -1,0 +1,13 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "piscineds",
+      "Group": "Servers",
+      "Host": "postgres",
+      "Port": 5432,
+      "MaintenanceDB": "piscineds",
+      "Username": "__POSTGRES_USER__",
+      "SSLMode": "prefer"
+    }
+  }
+}
