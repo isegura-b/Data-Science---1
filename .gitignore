@@ -1,0 +1,4 @@
+.env
+.nfs*
+__pycache__/
+subject/*

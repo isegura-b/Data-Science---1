@@ -1,0 +1,36 @@
+services:
+  db:
+    image: postgres:16
+    container_name: data_warehouse_db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  pgadmin:
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM dpage/pgadmin4:9.18
+        COPY --chown=pgadmin:root --chmod=0555 start.py /usr/local/bin/start.py
+    image: data-warehouse-pgadmin
+    container_name: data_warehouse_pgadmin
+    entrypoint: ["/venv/bin/python3", "/usr/local/bin/start.py", "--pgadmin"]
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
+      PGADMIN_REPLACE_SERVERS_ON_STARTUP: "True"
+      PGADMIN_SERVER_JSON_FILE: /tmp/servers.json
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+    ports:
+      - "5050:80"
+    depends_on:
+      - db
+
+volumes:
+  postgres_data:
