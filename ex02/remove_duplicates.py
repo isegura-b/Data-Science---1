@@ -17,11 +17,18 @@ PSQL = [
 
 
 def main():
-    # Comprueba si existe la tabla customers.
+    # Compara todas las columnas salvo la fecha, incluidas las fichas de
+    # producto si se vuelve a ejecutar la limpieza despues de la fusion.
     result = subprocess.run(
         PSQL + [
             "-tAc",
-            "SELECT to_regclass('public.customers') IS NOT NULL;",
+            """
+            SELECT string_agg(quote_ident(attname), ', ' ORDER BY attnum)
+            FROM pg_attribute
+            WHERE attrelid = to_regclass('public.customers')
+              AND attnum > 0 AND NOT attisdropped
+              AND attname <> 'event_time';
+            """,
         ],
         cwd=ROOT,
         capture_output=True,
@@ -30,11 +37,12 @@ def main():
     )
 
     # Si no existe, avisa y termina sin ejecutar la limpieza.
-    if result.stdout.strip() != "t":
+    partition_columns = result.stdout.strip()
+    if not partition_columns:
         print("No existe la tabla customers. Ejecuta primero el ejercicio 01.")
         return
 
-    sql = """
+    sql = f"""
         BEGIN;
 
         -- Si otra consulta bloquea la tabla, avisa tras 10 segundos.
@@ -44,51 +52,40 @@ def main():
         SET LOCAL work_mem = '128MB';
 
         -- Evita cambios en customers mientras hacemos la limpieza.
-        LOCK TABLE customers IN ACCESS EXCLUSIVE MODE;
+        LOCK TABLE public.customers IN ACCESS EXCLUSIVE MODE;
 
         -- Guarda únicamente los eventos que queremos conservar.
         CREATE TEMP TABLE customers_clean ON COMMIT DROP AS
-        SELECT
-            event_time,
-            event_type,
-            product_id,
-            price,
-            user_id,
-            user_session
+        SELECT (event_row).*
         FROM (
             SELECT
-                *,
+                c AS event_row,
+                -- Se compara con el evento anterior original, incluso si
+                -- ese evento se elimina: los intervalos <= 1 s se agrupan.
                 event_time - LAG(event_time) OVER (
-                    PARTITION BY event_type, product_id, price,
-                                 user_id, user_session
+                    PARTITION BY {partition_columns}
                     ORDER BY event_time, ctid
                 ) AS time_difference
-            FROM customers
+            FROM public.customers AS c
         ) AS events
         WHERE time_difference IS NULL
            OR time_difference > INTERVAL '1 second';
 
         -- Muestra cuántas filas se van a eliminar.
         SELECT
-            (SELECT COUNT(*) FROM customers)
+            (SELECT COUNT(*) FROM public.customers)
             - (SELECT COUNT(*) FROM customers_clean)
             AS duplicates_removed;
 
         -- Vacía la tabla y recupera las filas válidas.
-        TRUNCATE TABLE customers;
+        TRUNCATE TABLE public.customers;
 
-        INSERT INTO customers (
-            event_time, event_type, product_id,
-            price, user_id, user_session
-        )
-        SELECT
-            event_time, event_type, product_id,
-            price, user_id, user_session
-        FROM customers_clean;
+        -- Conserva también las columnas añadidas por la fusión.
+        INSERT INTO public.customers SELECT * FROM customers_clean;
 
         COMMIT;
 
-        ANALYZE customers;
+        ANALYZE public.customers;
     """
 
     print("Limpiando customers; puede tardar con millones de filas...", flush=True)

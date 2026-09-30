@@ -2,7 +2,6 @@
 
 import subprocess
 import sys
-import uuid
 from pathlib import Path
 
 
@@ -16,10 +15,7 @@ PSQL = [
 
 
 def main():
-    # Un nombre propio evita conflictos con tablas de intentos anteriores.
-    new_table = "customers_fusion_" + uuid.uuid4().hex
-
-    sql = rf"""
+    sql = r"""
 \echo 1/5: Conectado. Comprobando tablas y bloqueos...
 BEGIN;
 SET LOCAL lock_timeout = '3s';
@@ -48,11 +44,18 @@ END $$;
 LOCK TABLE public.item IN SHARE MODE NOWAIT;
 
 \echo 2/5: Preparando las fichas de productos...
--- Elimina solo fichas completamente identicas, no fichas distintas.
+-- Una fila por producto: completa los atributos ausentes con los conocidos.
+-- Si existen varios valores conocidos, MAX resuelve el empate de forma
+-- determinista (no implica que sea el mas reciente). item queda intacta.
 CREATE TEMP TABLE fusion_items ON COMMIT DROP AS
-SELECT DISTINCT product_id, category_id, category_code, brand
-FROM public.item;
-CREATE INDEX ON fusion_items (product_id);
+SELECT product_id,
+       MAX(category_id) AS category_id,
+       MAX(NULLIF(category_code, '') COLLATE "C") AS category_code,
+       MAX(NULLIF(brand, '') COLLATE "C") AS brand
+FROM public.item
+WHERE product_id IS NOT NULL
+GROUP BY product_id;
+CREATE UNIQUE INDEX ON fusion_items (product_id);
 ANALYZE fusion_items;
 
 \echo 3/5: Preparando las columnas de customers...
@@ -62,24 +65,20 @@ ALTER TABLE public.customers
     ADD COLUMN IF NOT EXISTS brand TEXT;
 
 \echo 4/5: Construyendo la fusion. Esta fase puede tardar...
-CREATE TABLE public.{new_table} AS
-SELECT
-    c.event_time,
-    c.event_type,
-    c.product_id,
-    c.price,
-    c.user_id,
-    c.user_session,
-    COALESCE(i.category_id, c.category_id) AS category_id,
-    COALESCE(i.category_code, c.category_code) AS category_code,
-    COALESCE(i.brand, c.brand) AS brand
-FROM public.customers AS c
-LEFT JOIN fusion_items AS i ON c.product_id = i.product_id;
+-- Solo actualiza atributos: no inserta ni elimina eventos.
+-- Conserva las filas sin ficha y los valores existentes sin reemplazo.
+UPDATE public.customers AS c
+SET category_id = COALESCE(i.category_id, c.category_id),
+    category_code = COALESCE(i.category_code, c.category_code),
+    brand = COALESCE(i.brand, c.brand)
+FROM fusion_items AS i
+WHERE c.product_id = i.product_id
+  AND (c.category_id, c.category_code, c.brand) IS DISTINCT FROM
+      (COALESCE(i.category_id, c.category_id),
+       COALESCE(i.category_code, c.category_code),
+       COALESCE(i.brand, c.brand));
 
-\echo 5/5: Sustituyendo customers y guardando...
--- Si hay dependencias, falla sin borrarlas: no se usa CASCADE.
-DROP TABLE public.customers;
-ALTER TABLE public.{new_table} RENAME TO customers;
+\echo 5/5: Guardando customers...
 COMMIT;
 \echo Fusion guardada correctamente.
 """

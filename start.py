@@ -38,7 +38,7 @@ ITEM_SCHEMA = """
 # El usuario y la base se leen de las variables de entorno del contenedor.
 PSQL = [
     "docker", "compose", "exec", "-T", "db", "sh", "-c",
-    'exec psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" '
+    'exec psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" '
     '-d "$POSTGRES_DB" "$@"',
     "sh",
 ]
@@ -53,10 +53,9 @@ def psql(sql):
 
 
 def load_csv(path, schema):
-    # Si no existe el CSV, avisa y continúa sin crear ni borrar la tabla.
+    # Un archivo ausente debe impedir que se anuncie una carga correcta.
     if not path.is_file():
-        print(f"No se encuentra el archivo: {path}", flush=True)
-        return
+        raise FileNotFoundError(f"No se encuentra el archivo: {path}")
 
     # Crea una tabla a partir del nombre del CSV e importa sus filas.
     table = path.stem
@@ -66,19 +65,20 @@ def load_csv(path, schema):
     if not re.fullmatch(r"[a-zA-Z_][a-zA-Z_0-9]*", table):
         raise ValueError(f"Nombre de tabla no válido: {table}")
 
-    # Borra la versión anterior para reflejar cualquier cambio del CSV.
-    psql(f'DROP TABLE IF EXISTS "{table}"')
-
-    # Crea de nuevo la tabla con el esquema correspondiente.
-    psql(f'CREATE TABLE "{table}" ({schema})')
-
     print(f'{table}: recreando desde {path.name}...', flush=True)
 
     # Abre el CSV en el ordenador y envía su contenido a psql.
     # \copy interpreta la primera línea como cabecera (HEADER TRUE).
     with path.open("rb") as csv_file:
         subprocess.run(
-            PSQL + [ "-c", f'\\copy "{table}" FROM STDIN WITH (FORMAT CSV, HEADER TRUE)', ],
+            # Una sola sesión y transacción: si COPY falla, se conserva
+            # la tabla anterior. El CSV se transmite sin cargarlo en memoria.
+            PSQL + [
+                "--single-transaction",
+                "-c", f'DROP TABLE IF EXISTS public."{table}"',
+                "-c", f'CREATE TABLE public."{table}" ({schema})',
+                "-c", f'\\copy public."{table}" FROM STDIN WITH (FORMAT CSV, HEADER TRUE)',
+            ],
             cwd=ROOT,
             stdin=csv_file,
             check=True,
@@ -87,6 +87,17 @@ def load_csv(path, schema):
 
 def start_project():
     """Arranca Docker y carga los CSV en PostgreSQL."""
+    # Comprueba los archivos antes de arrancar Docker o cambiar las tablas.
+    item_path = ROOT / "subject/item/item.csv"
+    customer_paths = sorted((ROOT / "subject/customer").glob("*.csv"))
+    if not item_path.is_file():
+        raise FileNotFoundError(f"No se encuentra el archivo: {item_path}")
+    if not customer_paths:
+        raise FileNotFoundError("No hay CSV en subject/customer/")
+    for path in customer_paths:
+        if not path.is_file() or not re.fullmatch(r"data_202[0-9]_[a-z]{3}", path.stem):
+            raise ValueError(f"CSV de clientes no válido para ex01: {path.name}")
+
     # Construye las imágenes necesarias y arranca los contenedores en segundo plano.
     subprocess.run(
         ["docker", "compose", "up", "--build", "-d"],
@@ -116,10 +127,10 @@ def start_project():
         raise RuntimeError("PostgreSQL no está disponible")
 
     # Crea e importa la tabla item.
-    load_csv(ROOT / "subject/item/item.csv", ITEM_SCHEMA)
+    load_csv(item_path, ITEM_SCHEMA)
 
     # Crea e importa una tabla por cada CSV de subject/customer/.
-    for path in sorted((ROOT / "subject/customer").glob("*.csv")):
+    for path in customer_paths:
         load_csv(path, CUSTOMER_SCHEMA)
 
     print("pgAdmin: http://127.0.0.1:5050")
