@@ -53,7 +53,12 @@ def psql(sql):
 
 
 def load_csv(path, schema):
-    #Crea una tabla a partir del nombre del CSV e importa sus filas.
+    # Si no existe el CSV, avisa y continúa sin crear ni borrar la tabla.
+    if not path.is_file():
+        print(f"No se encuentra el archivo: {path}", flush=True)
+        return
+
+    # Crea una tabla a partir del nombre del CSV e importa sus filas.
     table = path.stem
 
     # El nombre de tabla se insertará en una consulta SQL.
